@@ -16,7 +16,8 @@ This repository contains the reference C implementation, an AVX2-optimized versi
 *   **Full-State Constant Injection:** For structural attack resistance.
 *   **Sponge-based Key Schedule:** 1024-bit internal state for robust key derivation.
 *   **Transparent Constants:** All constants derived from SHAKE256.
-*   **AVX2 Optimization:** High-performance implementation for modern x86-64 CPUs.
+*   **AVX2 Optimization:** High-performance implementation for modern x86-64 CPUs (3.6 cpb, 630MiB/s on 2.4 GHz Core i9-13900HX).
+
 
 ## Algorithm Parameters
 
