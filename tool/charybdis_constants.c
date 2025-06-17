@@ -3,7 +3,7 @@
  * 
  * Author: Mounir IDRASSI <mounir.idrassi@amcrypto.jp>
  * Version: 1.0
- * Date: June 15, 2025
+ * Date: June 17, 2025
  * 
  * This program uses the OpenSSL library to derive all round constants (RC),
  * key schedule initialization constants (C_INIT), and key schedule permutation
@@ -136,7 +136,8 @@ int main() {
     const char* ks_seed = "Charybdis-Constants-v1.0";
     #define C_INIT_NUM_CONSTANTS 24
     #define RC_F_NUM_CONSTANTS (16 * 4)
-    #define TOTAL_KS_NUM_CONSTANTS (C_INIT_NUM_CONSTANTS + RC_F_NUM_CONSTANTS)
+    #define KSC_NUM_CONSTANTS 736
+    #define TOTAL_KS_NUM_CONSTANTS (C_INIT_NUM_CONSTANTS + RC_F_NUM_CONSTANTS + KSC_NUM_CONSTANTS)
     #define TOTAL_KS_BYTES (TOTAL_KS_NUM_CONSTANTS * 4)
     uint8_t ks_buffer[TOTAL_KS_BYTES];
 
@@ -150,7 +151,11 @@ int main() {
 
     // Print the RC_F part by pointing to the correct offset in the buffer
 	print_constants("Key schedule permutation round constants (RC_F) for 16 rounds", "RC_F",
-        ks_buffer + (C_INIT_NUM_CONSTANTS * 4), RC_F_NUM_CONSTANTS, 4);
+        ks_buffer + (C_INIT_NUM_CONSTANTS * 4), RC_F_NUM_CONSTANTS, 8);
+
+    // Print the KSC part by pointing to the correct offset in the buffer
+    print_constants("// Key Schedule domain separation Constants (KSC) for 23 rounds of squeezing.", "KSC",
+        ks_buffer + (C_INIT_NUM_CONSTANTS + RC_F_NUM_CONSTANTS) * 4, KSC_NUM_CONSTANTS, 8);
 
     return 0;
 }
