@@ -76,9 +76,6 @@
 #define ALWAYS_INLINE static inline
 #endif
 
-/* Endian swap mask */
-static __m256i avx2_swap_mask;
-
 /* =============================================================================
  * AVX2 CAPABILITY DETECTION
  * ============================================================================= */
@@ -532,15 +529,14 @@ ALWAYS_INLINE void avx2_sub_constants(__m256i state[4][4],
 /**
  * @brief Load 8 blocks with optimized in-register transpose
  * 
- * Eliminates expensive temporary buffer by doing endian conversion and
- * AoS->SoA transpose entirely in registers using vpshufb + interleave network.
+ * Loads 8 blocks directly and transposes from AoS to SoA layout in registers.
+ * Since the memory format is now little-endian, no byte-swapping is required.
  */
 static void avx2_load_8_blocks_optimized(const uint8_t* in, __m256i state[4][4]) {
-    /* Load 16 vectors (8 blocks * 2 vectors each) with endian swap */
+    /* Load 16 vectors (8 blocks * 2 vectors each). No byte swap needed. */
     __m256i data[16];
     for (int i = 0; i < 16; i++) {
-        __m256i raw = _mm256_loadu_si256((const __m256i*)(in + i * 32));
-        data[i] = _mm256_shuffle_epi8(raw, avx2_swap_mask);
+        data[i] = _mm256_loadu_si256((const __m256i*)(in + i * 32));
     }
     
     /* 4-level interleave network for AoS->SoA transpose */
@@ -575,6 +571,9 @@ static void avx2_load_8_blocks_optimized(const uint8_t* in, __m256i state[4][4])
 
 /**
  * @brief Store 8 blocks with optimized in-register transpose
+ * 
+ * Transposes from SoA to AoS layout and stores directly to memory.
+ * No byte-swapping is required.
  */
 static void avx2_store_8_blocks_optimized(const __m256i state[4][4], uint8_t* out) {
     /* Prepare data for reverse transpose */
@@ -606,10 +605,9 @@ static void avx2_store_8_blocks_optimized(const __m256i state[4][4], uint8_t* ou
         data[i*2+1] = _mm256_unpackhi_epi32(level1[i*2], level1[i*2+1]);
     }
     
-    /* Store with endian conversion */
+    /* Store directly to memory. No byte swap needed. */
     for (int i = 0; i < 16; i++) {
-        __m256i swapped = _mm256_shuffle_epi8(data[i], avx2_swap_mask);
-        _mm256_storeu_si256((__m256i*)(out + i * 32), swapped);
+        _mm256_storeu_si256((__m256i*)(out + i * 32), data[i]);
     }
 }
 
@@ -660,13 +658,9 @@ int charybdis_avx2_init_context(charybdis_avx2_context_t* ctx,
     static int avx2_available = 0;
     if (!ctx || !subkeys) return -1;
     
-    /* Verify AVX2 is still available */
+    /* Verify AVX2 is available */
     if (!avx2_checked) {
         avx2_available = charybdis_avx2_available();
-        avx2_swap_mask = _mm256_setr_epi8(
-            3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12,
-            3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12
-        );
         avx2_checked = 1;
     }
     if (!avx2_available) return -1;

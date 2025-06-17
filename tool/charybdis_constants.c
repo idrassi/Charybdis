@@ -26,15 +26,15 @@
 #include <openssl/evp.h>
 #include <openssl/err.h>
 
- /**
-  * @brief Prints an array of 32-bit constants in the specified format.
-  *
-  * @param title A descriptive title for the constant block.
-  * @param name The name of the constant array to be printed.
-  * @param constants A buffer containing the constants as raw bytes.
-  * @param num_constants The total number of 32-bit constants in the buffer.
-  * @param items_per_line The number of constants to print on each line.
-  */
+/**
+ * @brief Prints an array of 32-bit constants in little-endian format.
+ *
+ * @param title A descriptive title for the constant block.
+ * @param name The name of the constant array to be printed.
+ * @param constants A buffer containing the constants as raw bytes.
+ * @param num_constants The total number of 32-bit constants in the buffer.
+ * @param items_per_line The number of constants to print on each line.
+ */
 void print_constants(const char* title, const char* name, const uint8_t* constants, size_t num_constants, size_t items_per_line) {
     printf("// %s\n", title);
     printf("static const uint32_t %s[%zu] = {\n", name, num_constants);
@@ -44,11 +44,13 @@ void print_constants(const char* title, const char* name, const uint8_t* constan
             printf("    ");
         }
 
-        // Convert 4 bytes from big-endian to a uint32_t
-        uint32_t val = ((uint32_t)constants[i * 4 + 0] << 24) |
-            ((uint32_t)constants[i * 4 + 1] << 16) |
-            ((uint32_t)constants[i * 4 + 2] << 8) |
-            ((uint32_t)constants[i * 4 + 3]);
+        // Convert 4 bytes to a uint32_t using LITTLE-ENDIAN interpretation.
+        // The first byte from the SHAKE stream is the least significant byte (LSB).
+        const uint8_t* p = &constants[i * 4];
+        uint32_t val = (uint32_t)p[0] |
+                       ((uint32_t)p[1] << 8) |
+                       ((uint32_t)p[2] << 16) |
+                       ((uint32_t)p[3] << 24);
 
         printf("0x%08X", val);
 
@@ -118,25 +120,25 @@ err:
 }
 
 int main() {
-    printf("--- Charybdis v1.0 Constant Generation Utility ---\n\n");
+    printf("--- Charybdis v1.0 Little Endian Constant Generation Utility ---\n\n");
 
     // --- Generate Cipher Round Constants (RC) ---
     const char* rc_seed = "Charybdis-v1.0";
-    #define rc_num_constants  352 // 22 rounds * 16 words
-#define rc_bytes (rc_num_constants * 4)
-    uint8_t rc_buffer[rc_bytes];
+    #define RC_NUM_CONSTANTS 352 // 22 rounds * 16 words
+    #define RC_BYTES (RC_NUM_CONSTANTS * 4)
+    uint8_t rc_buffer[RC_BYTES];
 
-    if (!generate_shake256(rc_seed, rc_buffer, rc_bytes)) {
+    if (!generate_shake256(rc_seed, rc_buffer, RC_BYTES)) {
         return 1;
     }
-    print_constants("Round Constants (RC) for 22 rounds", "RC", rc_buffer, rc_num_constants, 8);
+    print_constants("Round Constants (RC) for 22 rounds", "RC", rc_buffer, RC_NUM_CONSTANTS, 8);
 
 
-    // --- Generate Key Schedule Constants (C_INIT and RC_F) ---
+    // --- Generate Key Schedule Constants (C_INIT, RC_F, KSC) ---
     const char* ks_seed = "Charybdis-Constants-v1.0";
     #define C_INIT_NUM_CONSTANTS 24
-    #define RC_F_NUM_CONSTANTS (16 * 4)
-    #define KSC_NUM_CONSTANTS 736
+    #define RC_F_NUM_CONSTANTS 64 // 16 rounds * 4 words
+    #define KSC_NUM_CONSTANTS 736 // 23 subkeys * 32 words
     #define TOTAL_KS_NUM_CONSTANTS (C_INIT_NUM_CONSTANTS + RC_F_NUM_CONSTANTS + KSC_NUM_CONSTANTS)
     #define TOTAL_KS_BYTES (TOTAL_KS_NUM_CONSTANTS * 4)
     uint8_t ks_buffer[TOTAL_KS_BYTES];
@@ -150,11 +152,11 @@ int main() {
         ks_buffer, C_INIT_NUM_CONSTANTS, 8);
 
     // Print the RC_F part by pointing to the correct offset in the buffer
-	print_constants("Key schedule permutation round constants (RC_F) for 16 rounds", "RC_F",
+    print_constants("Key schedule permutation round constants (RC_F) for 16 rounds", "RC_F",
         ks_buffer + (C_INIT_NUM_CONSTANTS * 4), RC_F_NUM_CONSTANTS, 8);
 
     // Print the KSC part by pointing to the correct offset in the buffer
-    print_constants("// Key Schedule domain separation Constants (KSC) for 23 rounds of squeezing.", "KSC",
+    print_constants("Key Schedule domain separation Constants (KSC) ", "KSC",
         ks_buffer + (C_INIT_NUM_CONSTANTS + RC_F_NUM_CONSTANTS) * 4, KSC_NUM_CONSTANTS, 8);
 
     return 0;

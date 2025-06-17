@@ -103,7 +103,7 @@ typedef struct {
             p[i] = 0; \
         } \
         /* LTO barrier to prevent optimization */
-__asm__ __volatile__("" : : "r"(ptr) : "memory"); \
+        __asm__ __volatile__("" : : "r"(ptr) : "memory"); \
 } while (0);
 #endif
 
@@ -114,13 +114,13 @@ __asm__ __volatile__("" : : "r"(ptr) : "memory"); \
  * Charybdis key schedule. The key schedule uses a sponge construction with
  * a 1024-bit internal state and a 16-round permutation.
  * 
- * @param[in]  master_key  256-bit master key (32 bytes, big-endian)
+ * @param[in]  master_key  256-bit master key (32 bytes, little-endian)
  * @param[out] subkeys     Array to store 24 expanded subkeys
  * 
  * @pre master_key must point to a valid 32-byte array
  * @pre subkeys must point to a valid array of 24 4x4 uint32_t matrices
  * 
- * @note All multi-byte values are processed in big-endian byte order
+ * @note All multi-byte values are processed in little-endian byte order
  * @note This function must be called before encryption/decryption
  */
 void Charybdis_KeySchedule(const uint8_t master_key[CHARYBDIS_KEY_SIZE], 
@@ -135,8 +135,8 @@ void Charybdis_KeySchedule(const uint8_t master_key[CHARYBDIS_KEY_SIZE],
  * 2. 22 main rounds with K[1] through K[22]
  * 3. Final whitening with K[23]
  * 
- * @param[in]  in       64-byte plaintext block (big-endian)
- * @param[out] out      64-byte ciphertext block (big-endian)
+ * @param[in]  in       64-byte plaintext block (little-endian)
+ * @param[out] out      64-byte ciphertext block (little-endian)
  * @param[in]  subkeys  Pre-computed subkeys from KeySchedule()
  * 
  * @pre in must point to a valid 64-byte array
@@ -144,7 +144,7 @@ void Charybdis_KeySchedule(const uint8_t master_key[CHARYBDIS_KEY_SIZE],
  * @pre subkeys must contain valid subkeys from KeySchedule()
  * 
  * @note Input and output buffers may be the same (in-place encryption)
- * @note All data is processed in big-endian byte order
+ * @note All data is processed in little-endian byte order
  */
 void Charybdis_EncryptBlock(const uint8_t in[CHARYBDIS_BLOCK_SIZE], 
                            uint8_t out[CHARYBDIS_BLOCK_SIZE],
@@ -159,8 +159,8 @@ void Charybdis_EncryptBlock(const uint8_t in[CHARYBDIS_BLOCK_SIZE],
  * 2. 22 inverse rounds with K[22] through K[1]
  * 3. Final whitening with K[0]
  * 
- * @param[in]  in       64-byte ciphertext block (big-endian)
- * @param[out] out      64-byte plaintext block (big-endian)
+ * @param[in]  in       64-byte ciphertext block (little-endian)
+ * @param[out] out      64-byte plaintext block (little-endian)
  * @param[in]  subkeys  Pre-computed subkeys from KeySchedule()
  * 
  * @pre in must point to a valid 64-byte array
@@ -168,7 +168,7 @@ void Charybdis_EncryptBlock(const uint8_t in[CHARYBDIS_BLOCK_SIZE],
  * @pre subkeys must contain valid subkeys from KeySchedule()
  * 
  * @note Input and output buffers may be the same (in-place decryption)
- * @note All data is processed in big-endian byte order
+ * @note All data is processed in little-endian byte order
  */
 void Charybdis_DecryptBlock(const uint8_t in[CHARYBDIS_BLOCK_SIZE], 
                            uint8_t out[CHARYBDIS_BLOCK_SIZE],
@@ -185,7 +185,7 @@ void Charybdis_DecryptBlock(const uint8_t in[CHARYBDIS_BLOCK_SIZE],
  * This simplifies the API for applications that prefer context-based usage.
  * 
  * @param[out] ctx        Charybdis context to initialize
- * @param[in]  master_key 256-bit master key (32 bytes, big-endian)
+ * @param[in]  master_key 256-bit master key (32 bytes, little-endian)
  * 
  * @return 0 on success, non-zero on failure
  * 

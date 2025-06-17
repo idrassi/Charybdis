@@ -160,14 +160,10 @@ void charybdis_avx2_clear_context(charybdis_avx2_context_t* ctx);
  * @param[in]  nblocks  Number of 64-byte blocks to encrypt
  * @param[in]  ctx      Initialized AVX2 context
  * 
- * @pre in must point to nblocks * 64 bytes of readable memory
- * @pre out must point to nblocks * 64 bytes of writable memory
- * @pre ctx must be initialized with charybdis_avx2_init_context()
- * @pre nblocks > 0
  * 
  * @note in and out may be the same (in-place encryption supported)
  * @note in and out may overlap if out >= in + 64 (forward overlap only)
- * @note All data processed in big-endian format per Charybdis specification
+ * @note All data processed in little-endian format per Charybdis specification
  * @note Function is constant-time for the same nblocks value
  *
  * @return 0 on success, -1 on invalid input or context error.
@@ -186,6 +182,9 @@ int charybdis_avx2_encrypt_blocks(const uint8_t* in,
  * @param[in]  nblocks  Number of 64-byte blocks to decrypt  
  * @param[in]  ctx      Initialized AVX2 context
  *
+ * @note in and out may be the same (in-place decryption supported)
+ * @note in and out may overlap if out >= in + 64 (forward overlap only)
+ * @note All data processed in little-endian format per Charybdis specification
  * @return 0 on success, -1 on invalid input or context error.
  */
 int charybdis_avx2_decrypt_blocks(const uint8_t* in,
