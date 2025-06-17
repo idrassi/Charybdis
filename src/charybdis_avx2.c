@@ -50,7 +50,7 @@
  * AVX2 HELPER MACROS AND CONSTANTS
  * ============================================================================= */
 
-/* Fixed rotation macros - handle n=0 case to avoid UB */
+/* rotation macros - handle n=0 case to avoid UB */
 #define AVX2_ROR32(v, n) _mm256_or_si256(_mm256_srli_epi32((v), (n)), \
                                          _mm256_slli_epi32((v), (32-(n)) & 31))
 
@@ -76,11 +76,8 @@
 #define ALWAYS_INLINE static inline
 #endif
 
-/* Fix: Corrected endian swap mask - only swap bytes within each dword */
-static const ALIGN32 uint8_t be_swap_mask[32] = {
-     3,  2,  1,  0,  7,  6,  5,  4, 11, 10,  9,  8, 15, 14, 13, 12,
-     3,  2,  1,  0,  7,  6,  5,  4, 11, 10,  9,  8, 15, 14, 13, 12
-};
+/* Endian swap mask */
+static __m256i avx2_swap_mask;
 
 /* =============================================================================
  * AVX2 CAPABILITY DETECTION
@@ -284,119 +281,175 @@ ALWAYS_INLINE void avx2_inv_h_mix_stage1(__m256i* a, __m256i* b, __m256i* d) {
 /* Optimized ColumnMix with maximum ILP */
 ALWAYS_INLINE void avx2_column_mix(__m256i state[4][4]) {
     /* G_Mix with pipelined execution across all 4 columns */
-    for (int col = 0; col < 4; col++) {
-        avx2_g_mix_stage1(&state[0][col], &state[1][col], &state[3][col]);
-    }
-    for (int col = 0; col < 4; col++) {
-        avx2_g_mix_stage2(&state[2][col], &state[1][col], &state[3][col]);
-    }
-    for (int col = 0; col < 4; col++) {
-        avx2_g_mix_stage3(&state[0][col], &state[1][col], &state[3][col]);
-    }
-    for (int col = 0; col < 4; col++) {
-        avx2_g_mix_stage4(&state[2][col], &state[1][col], &state[3][col]);
-    }
+    avx2_g_mix_stage1(&state[0][0], &state[1][0], &state[3][0]);
+    avx2_g_mix_stage1(&state[0][1], &state[1][1], &state[3][1]);
+    avx2_g_mix_stage1(&state[0][2], &state[1][2], &state[3][2]);
+    avx2_g_mix_stage1(&state[0][3], &state[1][3], &state[3][3]);
+
+    avx2_g_mix_stage2(&state[2][0], &state[1][0], &state[3][0]);
+    avx2_g_mix_stage2(&state[2][1], &state[1][1], &state[3][1]);
+    avx2_g_mix_stage2(&state[2][2], &state[1][2], &state[3][2]);
+    avx2_g_mix_stage2(&state[2][3], &state[1][3], &state[3][3]);
+
+    avx2_g_mix_stage3(&state[0][0], &state[1][0], &state[3][0]);
+    avx2_g_mix_stage3(&state[0][1], &state[1][1], &state[3][1]);
+    avx2_g_mix_stage3(&state[0][2], &state[1][2], &state[3][2]);
+    avx2_g_mix_stage3(&state[0][3], &state[1][3], &state[3][3]);
+
+    avx2_g_mix_stage4(&state[2][0], &state[1][0], &state[3][0]);
+    avx2_g_mix_stage4(&state[2][1], &state[1][1], &state[3][1]);
+    avx2_g_mix_stage4(&state[2][2], &state[1][2], &state[3][2]);
+    avx2_g_mix_stage4(&state[2][3], &state[1][3], &state[3][3]);
     
     /* H_Mix pipelined */
-    for (int col = 0; col < 4; col++) {
-        avx2_h_mix_stage1(&state[0][col], &state[1][col], &state[3][col]);
-    }
-    for (int col = 0; col < 4; col++) {
-        avx2_h_mix_stage2(&state[2][col], &state[1][col], &state[3][col]);
-    }
-    for (int col = 0; col < 4; col++) {
-        avx2_h_mix_stage3(&state[0][col], &state[1][col], &state[3][col]);
-    }
-    for (int col = 0; col < 4; col++) {
-        avx2_h_mix_stage4(&state[2][col], &state[1][col], &state[3][col]);
-    }
+    avx2_h_mix_stage1(&state[0][0], &state[1][0], &state[3][0]);
+    avx2_h_mix_stage1(&state[0][1], &state[1][1], &state[3][1]);
+    avx2_h_mix_stage1(&state[0][2], &state[1][2], &state[3][2]);
+    avx2_h_mix_stage1(&state[0][3], &state[1][3], &state[3][3]);
+
+    avx2_h_mix_stage2(&state[2][0], &state[1][0], &state[3][0]);
+    avx2_h_mix_stage2(&state[2][1], &state[1][1], &state[3][1]);
+    avx2_h_mix_stage2(&state[2][2], &state[1][2], &state[3][2]);
+    avx2_h_mix_stage2(&state[2][3], &state[1][3], &state[3][3]);
+
+    avx2_h_mix_stage3(&state[0][0], &state[1][0], &state[3][0]);
+    avx2_h_mix_stage3(&state[0][1], &state[1][1], &state[3][1]);
+    avx2_h_mix_stage3(&state[0][2], &state[1][2], &state[3][2]);
+    avx2_h_mix_stage3(&state[0][3], &state[1][3], &state[3][3]);
+
+    avx2_h_mix_stage4(&state[2][0], &state[1][0], &state[3][0]);
+    avx2_h_mix_stage4(&state[2][1], &state[1][1], &state[3][1]);
+    avx2_h_mix_stage4(&state[2][2], &state[1][2], &state[3][2]);
+    avx2_h_mix_stage4(&state[2][3], &state[1][3], &state[3][3]);
     
     /* H_Mix with permuted indices [2,3,0,1] */
-    for (int col = 0; col < 4; col++) {
-        avx2_h_mix_stage1(&state[2][col], &state[3][col], &state[1][col]);
-    }
-    for (int col = 0; col < 4; col++) {
-        avx2_h_mix_stage2(&state[0][col], &state[3][col], &state[1][col]);
-    }
-    for (int col = 0; col < 4; col++) {
-        avx2_h_mix_stage3(&state[2][col], &state[3][col], &state[1][col]);
-    }
-    for (int col = 0; col < 4; col++) {
-        avx2_h_mix_stage4(&state[0][col], &state[3][col], &state[1][col]);
-    }
+    avx2_h_mix_stage1(&state[2][0], &state[3][0], &state[1][0]);
+    avx2_h_mix_stage1(&state[2][1], &state[3][1], &state[1][1]);
+    avx2_h_mix_stage1(&state[2][2], &state[3][2], &state[1][2]);
+    avx2_h_mix_stage1(&state[2][3], &state[3][3], &state[1][3]);
+
+    avx2_h_mix_stage2(&state[0][0], &state[3][0], &state[1][0]);
+    avx2_h_mix_stage2(&state[0][1], &state[3][1], &state[1][1]);
+    avx2_h_mix_stage2(&state[0][2], &state[3][2], &state[1][2]);
+    avx2_h_mix_stage2(&state[0][3], &state[3][3], &state[1][3]);
+
+    avx2_h_mix_stage3(&state[2][0], &state[3][0], &state[1][0]);
+    avx2_h_mix_stage3(&state[2][1], &state[3][1], &state[1][1]);
+    avx2_h_mix_stage3(&state[2][2], &state[3][2], &state[1][2]);
+    avx2_h_mix_stage3(&state[2][3], &state[3][3], &state[1][3]);
+
+    avx2_h_mix_stage4(&state[0][0], &state[3][0], &state[1][0]);
+    avx2_h_mix_stage4(&state[0][1], &state[3][1], &state[1][1]);
+    avx2_h_mix_stage4(&state[0][2], &state[3][2], &state[1][2]);
+    avx2_h_mix_stage4(&state[0][3], &state[3][3], &state[1][3]);
     
     /* G_Mix with permuted indices [2,3,0,1] */
-    for (int col = 0; col < 4; col++) {
-        avx2_g_mix_stage1(&state[2][col], &state[3][col], &state[1][col]);
-    }
-    for (int col = 0; col < 4; col++) {
-        avx2_g_mix_stage2(&state[0][col], &state[3][col], &state[1][col]);
-    }
-    for (int col = 0; col < 4; col++) {
-        avx2_g_mix_stage3(&state[2][col], &state[3][col], &state[1][col]);
-    }
-    for (int col = 0; col < 4; col++) {
-        avx2_g_mix_stage4(&state[0][col], &state[3][col], &state[1][col]);
-    }
+    avx2_g_mix_stage1(&state[2][0], &state[3][0], &state[1][0]);
+    avx2_g_mix_stage1(&state[2][1], &state[3][1], &state[1][1]);
+    avx2_g_mix_stage1(&state[2][2], &state[3][2], &state[1][2]);
+    avx2_g_mix_stage1(&state[2][3], &state[3][3], &state[1][3]);
+
+    avx2_g_mix_stage2(&state[0][0], &state[3][0], &state[1][0]);
+    avx2_g_mix_stage2(&state[0][1], &state[3][1], &state[1][1]);
+    avx2_g_mix_stage2(&state[0][2], &state[3][2], &state[1][2]);
+    avx2_g_mix_stage2(&state[0][3], &state[3][3], &state[1][3]);
+
+    avx2_g_mix_stage3(&state[2][0], &state[3][0], &state[1][0]);
+    avx2_g_mix_stage3(&state[2][1], &state[3][1], &state[1][1]);
+    avx2_g_mix_stage3(&state[2][2], &state[3][2], &state[1][2]);
+    avx2_g_mix_stage3(&state[2][3], &state[3][3], &state[1][3]);
+
+    avx2_g_mix_stage4(&state[0][0], &state[3][0], &state[1][0]);
+    avx2_g_mix_stage4(&state[0][1], &state[3][1], &state[1][1]);
+    avx2_g_mix_stage4(&state[0][2], &state[3][2], &state[1][2]);
+    avx2_g_mix_stage4(&state[0][3], &state[3][3], &state[1][3]);
 }
 
 /* Inverse ColumnMix */
 ALWAYS_INLINE void avx2_inverse_column_mix(__m256i state[4][4]) {
     /* Inverse G_Mix with permuted indices [2,3,0,1] - applied in reverse stage order */
-    for (int col = 0; col < 4; col++) {
-        avx2_inv_g_mix_stage4(&state[0][col], &state[3][col], &state[1][col]);
-    }
-    for (int col = 0; col < 4; col++) {
-        avx2_inv_g_mix_stage3(&state[2][col], &state[3][col], &state[1][col]);
-    }
-    for (int col = 0; col < 4; col++) {
-        avx2_inv_g_mix_stage2(&state[0][col], &state[3][col], &state[1][col]);
-    }
-    for (int col = 0; col < 4; col++) {
-        avx2_inv_g_mix_stage1(&state[2][col], &state[3][col], &state[1][col]);
-    }
+    avx2_inv_g_mix_stage4(&state[0][0], &state[3][0], &state[1][0]);
+    avx2_inv_g_mix_stage4(&state[0][1], &state[3][1], &state[1][1]);
+    avx2_inv_g_mix_stage4(&state[0][2], &state[3][2], &state[1][2]);
+    avx2_inv_g_mix_stage4(&state[0][3], &state[3][3], &state[1][3]);
+
+    avx2_inv_g_mix_stage3(&state[2][0], &state[3][0], &state[1][0]);
+    avx2_inv_g_mix_stage3(&state[2][1], &state[3][1], &state[1][1]);
+    avx2_inv_g_mix_stage3(&state[2][2], &state[3][2], &state[1][2]);
+    avx2_inv_g_mix_stage3(&state[2][3], &state[3][3], &state[1][3]);
+
+    avx2_inv_g_mix_stage2(&state[0][0], &state[3][0], &state[1][0]);
+    avx2_inv_g_mix_stage2(&state[0][1], &state[3][1], &state[1][1]);
+    avx2_inv_g_mix_stage2(&state[0][2], &state[3][2], &state[1][2]);
+    avx2_inv_g_mix_stage2(&state[0][3], &state[3][3], &state[1][3]);
+
+    avx2_inv_g_mix_stage1(&state[2][0], &state[3][0], &state[1][0]);
+    avx2_inv_g_mix_stage1(&state[2][1], &state[3][1], &state[1][1]);
+    avx2_inv_g_mix_stage1(&state[2][2], &state[3][2], &state[1][2]);
+    avx2_inv_g_mix_stage1(&state[2][3], &state[3][3], &state[1][3]);
 
     /* Inverse H_Mix with permuted indices [2,3,0,1] - applied in reverse stage order */
-    for (int col = 0; col < 4; col++) {
-        avx2_inv_h_mix_stage4(&state[0][col], &state[3][col], &state[1][col]);
-    }
-    for (int col = 0; col < 4; col++) {
-        avx2_inv_h_mix_stage3(&state[2][col], &state[3][col], &state[1][col]);
-    }
-    for (int col = 0; col < 4; col++) {
-        avx2_inv_h_mix_stage2(&state[0][col], &state[3][col], &state[1][col]);
-    }
-    for (int col = 0; col < 4; col++) {
-        avx2_inv_h_mix_stage1(&state[2][col], &state[3][col], &state[1][col]);
-    }
+    avx2_inv_h_mix_stage4(&state[0][0], &state[3][0], &state[1][0]);
+    avx2_inv_h_mix_stage4(&state[0][1], &state[3][1], &state[1][1]);
+    avx2_inv_h_mix_stage4(&state[0][2], &state[3][2], &state[1][2]);
+    avx2_inv_h_mix_stage4(&state[0][3], &state[3][3], &state[1][3]);
+
+    avx2_inv_h_mix_stage3(&state[2][0], &state[3][0], &state[1][0]);
+    avx2_inv_h_mix_stage3(&state[2][1], &state[3][1], &state[1][1]);
+    avx2_inv_h_mix_stage3(&state[2][2], &state[3][2], &state[1][2]);
+    avx2_inv_h_mix_stage3(&state[2][3], &state[3][3], &state[1][3]);
+
+    avx2_inv_h_mix_stage2(&state[0][0], &state[3][0], &state[1][0]);
+    avx2_inv_h_mix_stage2(&state[0][1], &state[3][1], &state[1][1]);
+    avx2_inv_h_mix_stage2(&state[0][2], &state[3][2], &state[1][2]);
+    avx2_inv_h_mix_stage2(&state[0][3], &state[3][3], &state[1][3]);
+
+    avx2_inv_h_mix_stage1(&state[2][0], &state[3][0], &state[1][0]);
+    avx2_inv_h_mix_stage1(&state[2][1], &state[3][1], &state[1][1]);
+    avx2_inv_h_mix_stage1(&state[2][2], &state[3][2], &state[1][2]);
+    avx2_inv_h_mix_stage1(&state[2][3], &state[3][3], &state[1][3]);
 
     /* Inverse H_Mix - applied in reverse stage order */
-    for (int col = 0; col < 4; col++) {
-        avx2_inv_h_mix_stage4(&state[2][col], &state[1][col], &state[3][col]);
-    }
-    for (int col = 0; col < 4; col++) {
-        avx2_inv_h_mix_stage3(&state[0][col], &state[1][col], &state[3][col]);
-    }
-    for (int col = 0; col < 4; col++) {
-        avx2_inv_h_mix_stage2(&state[2][col], &state[1][col], &state[3][col]);
-    }
-    for (int col = 0; col < 4; col++) {
-        avx2_inv_h_mix_stage1(&state[0][col], &state[1][col], &state[3][col]);
-    }
+    avx2_inv_h_mix_stage4(&state[2][0], &state[1][0], &state[3][0]);
+    avx2_inv_h_mix_stage4(&state[2][1], &state[1][1], &state[3][1]);
+    avx2_inv_h_mix_stage4(&state[2][2], &state[1][2], &state[3][2]);
+    avx2_inv_h_mix_stage4(&state[2][3], &state[1][3], &state[3][3]);
+
+    avx2_inv_h_mix_stage3(&state[0][0], &state[1][0], &state[3][0]);
+    avx2_inv_h_mix_stage3(&state[0][1], &state[1][1], &state[3][1]);
+    avx2_inv_h_mix_stage3(&state[0][2], &state[1][2], &state[3][2]);
+    avx2_inv_h_mix_stage3(&state[0][3], &state[1][3], &state[3][3]);
+
+    avx2_inv_h_mix_stage2(&state[2][0], &state[1][0], &state[3][0]);
+    avx2_inv_h_mix_stage2(&state[2][1], &state[1][1], &state[3][1]);
+    avx2_inv_h_mix_stage2(&state[2][2], &state[1][2], &state[3][2]);
+    avx2_inv_h_mix_stage2(&state[2][3], &state[1][3], &state[3][3]);
+
+    avx2_inv_h_mix_stage1(&state[0][0], &state[1][0], &state[3][0]);
+    avx2_inv_h_mix_stage1(&state[0][1], &state[1][1], &state[3][1]);
+    avx2_inv_h_mix_stage1(&state[0][2], &state[1][2], &state[3][2]);
+    avx2_inv_h_mix_stage1(&state[0][3], &state[1][3], &state[3][3]);
 
     /* Inverse G_Mix - applied in reverse stage order */
-    for (int col = 0; col < 4; col++) {
-        avx2_inv_g_mix_stage4(&state[2][col], &state[1][col], &state[3][col]);
-    }
-    for (int col = 0; col < 4; col++) {
-        avx2_inv_g_mix_stage3(&state[0][col], &state[1][col], &state[3][col]);
-    }
-    for (int col = 0; col < 4; col++) {
-        avx2_inv_g_mix_stage2(&state[2][col], &state[1][col], &state[3][col]);
-    }
-    for (int col = 0; col < 4; col++) {
-        avx2_inv_g_mix_stage1(&state[0][col], &state[1][col], &state[3][col]);
-    }
+    avx2_inv_g_mix_stage4(&state[2][0], &state[1][0], &state[3][0]);
+    avx2_inv_g_mix_stage4(&state[2][1], &state[1][1], &state[3][1]);
+    avx2_inv_g_mix_stage4(&state[2][2], &state[1][2], &state[3][2]);
+    avx2_inv_g_mix_stage4(&state[2][3], &state[1][3], &state[3][3]);
+
+    avx2_inv_g_mix_stage3(&state[0][0], &state[1][0], &state[3][0]);
+    avx2_inv_g_mix_stage3(&state[0][1], &state[1][1], &state[3][1]);
+    avx2_inv_g_mix_stage3(&state[0][2], &state[1][2], &state[3][2]);
+    avx2_inv_g_mix_stage3(&state[0][3], &state[1][3], &state[3][3]);
+
+    avx2_inv_g_mix_stage2(&state[2][0], &state[1][0], &state[3][0]);
+    avx2_inv_g_mix_stage2(&state[2][1], &state[1][1], &state[3][1]);
+    avx2_inv_g_mix_stage2(&state[2][2], &state[1][2], &state[3][2]);
+    avx2_inv_g_mix_stage2(&state[2][3], &state[1][3], &state[3][3]);
+
+    avx2_inv_g_mix_stage1(&state[0][0], &state[1][0], &state[3][0]);
+    avx2_inv_g_mix_stage1(&state[0][1], &state[1][1], &state[3][1]);
+    avx2_inv_g_mix_stage1(&state[0][2], &state[1][2], &state[3][2]);
+    avx2_inv_g_mix_stage1(&state[0][3], &state[1][3], &state[3][3]);
 }
 
 /* Optimized ShiftRows using precomputed permutation masks */
@@ -483,13 +536,11 @@ ALWAYS_INLINE void avx2_sub_constants(__m256i state[4][4],
  * AoS->SoA transpose entirely in registers using vpshufb + interleave network.
  */
 static void avx2_load_8_blocks_optimized(const uint8_t* in, __m256i state[4][4]) {
-    const __m256i swap_mask = _mm256_load_si256((const __m256i*)be_swap_mask);
-    
     /* Load 16 vectors (8 blocks * 2 vectors each) with endian swap */
     __m256i data[16];
     for (int i = 0; i < 16; i++) {
         __m256i raw = _mm256_loadu_si256((const __m256i*)(in + i * 32));
-        data[i] = _mm256_shuffle_epi8(raw, swap_mask);
+        data[i] = _mm256_shuffle_epi8(raw, avx2_swap_mask);
     }
     
     /* 4-level interleave network for AoS->SoA transpose */
@@ -526,8 +577,6 @@ static void avx2_load_8_blocks_optimized(const uint8_t* in, __m256i state[4][4])
  * @brief Store 8 blocks with optimized in-register transpose
  */
 static void avx2_store_8_blocks_optimized(const __m256i state[4][4], uint8_t* out) {
-    const __m256i swap_mask = _mm256_load_si256((const __m256i*)be_swap_mask);
-    
     /* Prepare data for reverse transpose */
     __m256i level3[16];
     for (int i = 0; i < 4; i++) {
@@ -559,7 +608,7 @@ static void avx2_store_8_blocks_optimized(const __m256i state[4][4], uint8_t* ou
     
     /* Store with endian conversion */
     for (int i = 0; i < 16; i++) {
-        __m256i swapped = _mm256_shuffle_epi8(data[i], swap_mask);
+        __m256i swapped = _mm256_shuffle_epi8(data[i], avx2_swap_mask);
         _mm256_storeu_si256((__m256i*)(out + i * 32), swapped);
     }
 }
@@ -607,10 +656,20 @@ extern const uint32_t CHARYBDIS_RC[CHARYBDIS_RC_COUNT];
 
 int charybdis_avx2_init_context(charybdis_avx2_context_t* ctx,
                                 const uint32_t subkeys[CHARYBDIS_SUBKEYS][4][4]) {
+    static int avx2_checked = 0;
+    static int avx2_available = 0;
     if (!ctx || !subkeys) return -1;
     
     /* Verify AVX2 is still available */
-    if (!charybdis_avx2_available()) return -1;
+    if (!avx2_checked) {
+        avx2_available = charybdis_avx2_available();
+        avx2_swap_mask = _mm256_setr_epi8(
+            3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12,
+            3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12
+        );
+        avx2_checked = 1;
+    }
+    if (!avx2_available) return -1;
     
     /* Clear context first */
     memset(ctx, 0, sizeof(*ctx));
