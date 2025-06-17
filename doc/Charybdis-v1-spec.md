@@ -1,9 +1,9 @@
 ### **Charybdis Block Cipher**
 
-**Author:** Mounir IDRASSI <mounir.idrassi@amcrypto.jp>
-**Date:** June 15, 2025
-**Version:** 1.0
-**License:** CC0 1.0 Universal (Public Domain Dedication)
+**Author:** Mounir IDRASSI <mounir.idrassi@amcrypto.jp<br>
+**Date:** June 17, 2025<br>
+**Version:** 1.0<br>
+**License:** CC0 1.0 Universal (Public Domain Dedication)<br>
 
 #### **Abstract**
 
