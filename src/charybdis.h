@@ -102,7 +102,6 @@ typedef struct {
         for (i = 0; i < len; i++) { \
             p[i] = 0; \
         } \
-        /* LTO barrier to prevent optimization */
         __asm__ __volatile__("" : : "r"(ptr) : "memory"); \
 } while (0);
 #endif

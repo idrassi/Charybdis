@@ -35,11 +35,16 @@
  *   side-channel attacks. Production use should employ additional protections.
  */
 #ifdef _WIN32
+#define _CRT_SECURE_NO_WARNINGS
 #include <windows.h>
+#else
+#ifdef BENCHMARK
+#define _POSIX_C_SOURCE 199309L // for clock_gettime
+#define _XOPEN_SOURCE  500 // for posix_memalign
+#endif
 #endif
 #include <stdint.h>
 #include <string.h>
-#include <stdio.h>
 #include "charybdis.h"
 #include "charybdis_avx2.h"
 
@@ -482,6 +487,7 @@ void charybdis_clear(charybdis_context_t* ctx) {
  * ============================================================================= */
 
 #ifdef BENCHMARK
+#include <stdio.h>
 #include <time.h>
 #include <stdlib.h>
 
@@ -535,6 +541,26 @@ static double estimate_cpu_frequency(void) {
     uint64_t elapsed_cycles = end_cycles - start_cycles;
     
     return (double)elapsed_cycles / elapsed_time;
+}
+
+static inline void* malloc_aligned(size_t size, size_t alignment) {
+#ifdef _WIN32
+    return _aligned_malloc(size, alignment);
+#else
+    void* ptr = NULL;
+    if (posix_memalign(&ptr, alignment, size) != 0) {
+        return NULL;
+    }
+    return ptr;
+#endif
+}
+
+static inline void free_aligned(void* ptr) {
+#ifdef _WIN32
+    _aligned_free(ptr);
+#else
+    free(ptr);
+#endif
 }
 
 /* Benchmark configuration */
@@ -653,13 +679,8 @@ static benchmark_result_t benchmark_avx2_encrypt(const benchmark_config_t* confi
     const size_t data_size = config->nblocks * CHARYBDIS_BLOCK_SIZE;
     
     /* Allocate aligned buffers */
-#ifdef _WIN32
-    uint8_t* plaintext = (uint8_t*)_aligned_malloc(data_size, 32);
-    uint8_t* ciphertext = (uint8_t*)_aligned_malloc(data_size, 32);
-#else
-    uint8_t* plaintext = (uint8_t*)aligned_alloc(32, data_size);
-    uint8_t* ciphertext = (uint8_t*)aligned_alloc(32, data_size);
-#endif
+    uint8_t* plaintext = (uint8_t*) malloc_aligned(data_size, 32);
+    uint8_t* ciphertext = (uint8_t*) malloc_aligned(data_size, 32);
     
     uint8_t key[CHARYBDIS_KEY_SIZE];
     uint32_t subkeys[CHARYBDIS_SUBKEYS][4][4];
@@ -667,13 +688,8 @@ static benchmark_result_t benchmark_avx2_encrypt(const benchmark_config_t* confi
     
     if (!plaintext || !ciphertext) {
         printf("Aligned memory allocation failed\n");
-#ifdef _WIN32
-        _aligned_free(plaintext);
-        _aligned_free(ciphertext);
-#else
-        free(plaintext);
-        free(ciphertext);
-#endif
+        free_aligned(plaintext);
+        free_aligned(ciphertext);
         return result;
     }
     
@@ -940,3 +956,813 @@ int main(void) {
     return 0;
 }
 #endif /* BENCHMARK */
+
+/* =============================================================================
+ * TEST VECTOR GENERATION
+ * ============================================================================= */
+
+#ifdef GENERATE_TEST_VECTORS
+#include <time.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+/* Test vector types */
+typedef enum {
+    TV_BASIC,           /* Basic encryption/decryption test vectors */
+    TV_KEY_SCHEDULE,    /* Key schedule test vectors */
+    TV_MONTE_CARLO,     /* Monte Carlo test vectors */
+    TV_VARIABLE_KEY,    /* Variable key test vectors */
+    TV_VARIABLE_TEXT,   /* Variable text test vectors */
+    TV_RANDOM           /* Random test vectors */
+} test_vector_type_t;
+
+/* Test vector configuration */
+typedef struct {
+    test_vector_type_t type;
+    int count;
+    const char* filename;
+    const char* description;
+} test_vector_config_t;
+
+/* State for our Chaskey-based PRNG */
+typedef struct {
+    uint32_t key[4];      // The fixed key for the PRF
+    uint32_t counter[4];  // The 128-bit counter
+    uint8_t buffer[16];   // Buffer for leftover bytes
+    size_t buffer_pos;     // Position in the buffer
+} chaskey_prng_t;
+
+/* Chaskey-12 core permutation (12 rounds) */
+static void chaskey_permute(uint32_t state[4]) {
+    int i;
+    for (i = 0; i < 12; ++i) {
+        state[0] += state[1];
+        state[1] = ROTL(state[1], 5) ^ state[0];
+        state[0] = ROTL(state[0], 16);
+        state[2] += state[3];
+        state[3] = ROTL(state[3], 8) ^ state[2];
+        state[0] += state[3];
+        state[3] = ROTL(state[3], 13) ^ state[0];
+        state[2] += state[1];
+        state[1] = ROTL(state[1], 7) ^ state[2];
+        state[2] = ROTL(state[2], 16);
+    }
+}
+
+/* Initialize the PRNG with a fixed key and counter for reproducibility */
+static void chaskey_prng_init(chaskey_prng_t* prng) {
+    // A fixed, arbitrary key for the generator.
+    prng->key[0] = 0xDEADBEEF;
+    prng->key[1] = 0xCAFEBABE;
+    prng->key[2] = 0x12345678;
+    prng->key[3] = 0x9ABCDEF0;
+
+    // Reset counter and buffer
+    memset(prng->counter, 0, sizeof(prng->counter));
+    prng->buffer_pos = 16; // Buffer is initially empty
+}
+
+/* Helper to correctly increment the 128-bit PRNG counter with carry */
+static inline void chaskey_prng_increment_counter(chaskey_prng_t* prng) {
+    if (++prng->counter[0] == 0) {
+        if (++prng->counter[1] == 0) {
+            if (++prng->counter[2] == 0) {
+                ++prng->counter[3];
+            }
+        }
+    }
+}
+
+/* Generate a block of random bytes (Corrected Version) */
+static void chaskey_prng_generate(chaskey_prng_t* prng, uint8_t* out, size_t len) {
+    size_t i = 0;
+    // Use leftover bytes from buffer first
+    while (len > 0 && prng->buffer_pos < 16) {
+        out[i++] = prng->buffer[prng->buffer_pos++];
+        len--;
+    }
+
+    while (len >= 16) {
+        // Prepare state: state = key XOR counter
+        uint32_t state[4];
+        state[0] = prng->key[0] ^ prng->counter[0];
+        state[1] = prng->key[1] ^ prng->counter[1];
+        state[2] = prng->key[2] ^ prng->counter[2];
+        state[3] = prng->key[3] ^ prng->counter[3];
+
+        // Apply Chaskey permutation
+        chaskey_permute(state);
+
+        // Copy result to output
+        memcpy(out + i, state, 16);
+        i += 16;
+        len -= 16;
+
+        // Increment 128-bit counter using the helper
+        chaskey_prng_increment_counter(prng);
+    }
+
+    // Generate one last block if there's remaining length
+    if (len > 0) {
+        uint32_t state[4];
+        state[0] = prng->key[0] ^ prng->counter[0];
+        state[1] = prng->key[1] ^ prng->counter[1];
+        state[2] = prng->key[2] ^ prng->counter[2];
+        state[3] = prng->key[3] ^ prng->counter[3];
+        chaskey_permute(state);
+        memcpy(prng->buffer, state, 16);
+        
+        // Copy the remaining bytes needed
+        memcpy(out + i, prng->buffer, len);
+        prng->buffer_pos = len;
+
+        // Increment counter for next time using the helper
+        chaskey_prng_increment_counter(prng);
+    }
+}
+
+/* Print hex data with proper formatting */
+static void print_hex_data(FILE* fp, const char* label, const uint8_t* data, size_t len) {
+    size_t i;
+    fprintf(fp, "%s = ", label);
+    for (i = 0; i < len; i++) {
+        fprintf(fp, "%02X", data[i]);
+    }
+    fprintf(fp, "\n");
+}
+
+/* Print 32-bit word array in hex */
+static void print_hex_words(FILE* fp, const char* label, const uint32_t* words, size_t count) {
+    size_t i;
+    fprintf(fp, "%s = ", label);
+    for (i = 0; i < count; i++) {
+        fprintf(fp, "%08X", words[i]);
+    }
+    fprintf(fp, "\n");
+}
+
+/* Print subkey in matrix format */
+static void print_subkey_matrix(FILE* fp, const char* label, const uint32_t subkey[4][4]) {
+    size_t i, j;
+    fprintf(fp, "%s =\n", label);
+    for (i = 0; i < 4; i++) {
+        fprintf(fp, "  ");
+        for (j = 0; j < 4; j++) {
+            fprintf(fp, "%08X ", subkey[i][j]);
+        }
+        fprintf(fp, "\n");
+    }
+}
+
+/* Generate basic test vectors */
+static void generate_basic_test_vectors(const char* filename) {
+    /* Test vector sets */
+    const struct {
+        const char* name;
+        uint8_t key[32];
+        uint8_t plaintext[64];
+    } test_cases[] = {
+        /* Test Case 1: All zeros */
+        {
+            "All Zeros",
+            {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+             0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
+            {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+             0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+             0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+             0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}
+        },
+        /* Test Case 2: All ones */
+        {
+            "All Ones",
+            {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
+             0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF},
+            {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
+             0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
+             0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
+             0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF}
+        },
+        /* Test Case 3: Sequential */
+        {
+            "Sequential",
+            {0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0A,0x0B,0x0C,0x0D,0x0E,0x0F,
+             0x10,0x11,0x12,0x13,0x14,0x15,0x16,0x17,0x18,0x19,0x1A,0x1B,0x1C,0x1D,0x1E,0x1F},
+            {0x00,0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88,0x99,0xAA,0xBB,0xCC,0xDD,0xEE,0xFF,
+             0x00,0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88,0x99,0xAA,0xBB,0xCC,0xDD,0xEE,0xFF,
+             0x00,0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88,0x99,0xAA,0xBB,0xCC,0xDD,0xEE,0xFF,
+             0x00,0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88,0x99,0xAA,0xBB,0xCC,0xDD,0xEE,0xFF}
+        },
+        /* Test Case 4: Random 1 */
+        {
+            "Random 1",
+            {0xC7,0x0B,0xD0,0xCD,0x02,0x4C,0xF0,0x4F,0xD0,0x3B,0xC8,0x4E,0xAD,0x21,0x14,0x6E,
+            0xD8,0xB9,0xDB,0x0B,0xDD,0x29,0x8E,0x2F,0x04,0xB7,0x3E,0xEB,0x77,0x6C,0x79,0x21},
+            {0x1A,0x7F,0x2D,0x79,0xD8,0x2C,0xF7,0x07,0x9C,0xA4,0x24,0x61,0xED,0x8C,0xD6,0x6F,
+            0xE7,0x07,0x95,0x04,0x2A,0x6B,0x09,0xA3,0xD3,0xB5,0x80,0x23,0x68,0xE2,0x02,0x33,
+            0xCB,0xB7,0x3E,0x4D,0x5F,0xE3,0x9F,0xDB,0x66,0x99,0xDC,0x39,0x56,0x18,0x24,0xE6,
+            0x5A,0xE1,0x2C,0x54,0xE8,0xDB,0xC3,0x99,0xE4,0x7C,0x9C,0xEE,0xC9,0x52,0xA0,0x66}
+        }
+    };
+    FILE* fp;
+    size_t i;
+
+    fp = fopen(filename, "wb");
+    if (!fp) {
+        printf("Error: Cannot create file %s\n", filename);
+        return;
+    }
+    
+    fprintf(fp, "# Charybdis Basic Test Vectors\n");
+    fprintf(fp, "# Block Cipher: Charybdis\n");
+    fprintf(fp, "# Version: 1.0\n");
+    fprintf(fp, "# Block Size: 512 bits (64 bytes)\n");
+    fprintf(fp, "# Key Size: 256 bits (32 bytes)\n");
+    fprintf(fp, "# Generated: %s\n", __DATE__);
+    fprintf(fp, "\n");
+    
+
+    
+    for (i = 0; i < sizeof(test_cases) / sizeof(test_cases[0]); i++) {
+        uint32_t subkeys[24][4][4];
+        uint8_t ciphertext[64];
+        uint8_t decrypted[64];
+        
+        fprintf(fp, "# Test Case %zu: %s\n", i + 1, test_cases[i].name);
+        fprintf(fp, "COUNT = %zu\n", i);
+        print_hex_data(fp, "KEY", test_cases[i].key, 32);
+        print_hex_data(fp, "PLAINTEXT", test_cases[i].plaintext, 64);
+        
+        /* Generate subkeys and encrypt */
+        Charybdis_KeySchedule(test_cases[i].key, subkeys);
+        Charybdis_EncryptBlock(test_cases[i].plaintext, ciphertext, subkeys);
+        print_hex_data(fp, "CIPHERTEXT", ciphertext, 64);
+        
+        /* Verify decryption */
+        Charybdis_DecryptBlock(ciphertext, decrypted, subkeys);
+        if (memcmp(decrypted, test_cases[i].plaintext, 64) != 0) {
+            fprintf(fp, "# ERROR: Decryption verification failed!\n");
+            fprintf(stderr, "FATAL: Self-check failed during basic vector generation for test case %zu!\n", i);
+        }
+        
+        fprintf(fp, "\n");
+    }
+    
+    fclose(fp);
+    printf("Generated basic test vectors: %s\n", filename);
+}
+
+/* Generate key schedule test vectors */
+static void generate_key_schedule_test_vectors(const char* filename) {
+    const uint8_t test_keys[][32] = {
+        /* Key 1: All zeros */
+        {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+         0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
+        /* Key 2: Sequential */
+        {0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0A,0x0B,0x0C,0x0D,0x0E,0x0F,
+         0x10,0x11,0x12,0x13,0x14,0x15,0x16,0x17,0x18,0x19,0x1A,0x1B,0x1C,0x1D,0x1E,0x1F},
+        /* Key 3: Random pattern */
+        {0xAB,0xCD,0xEF,0x01,0x23,0x45,0x67,0x89,0xAB,0xCD,0xEF,0x01,0x23,0x45,0x67,0x89,
+         0xFE,0xDC,0xBA,0x98,0x76,0x54,0x32,0x10,0xFE,0xDC,0xBA,0x98,0x76,0x54,0x32,0x10}
+    };
+    size_t i;
+    FILE* fp = fopen(filename, "wb");
+    if (!fp) {
+        printf("Error: Cannot create file %s\n", filename);
+        return;
+    }
+    
+    fprintf(fp, "# Charybdis Key Schedule Test Vectors\n");
+    fprintf(fp, "# Block Cipher: Charybdis\n");
+    fprintf(fp, "# Key Schedule: Sponge-based with 1024-bit state\n");
+    fprintf(fp, "# Generated: %s\n", __DATE__);
+    fprintf(fp, "\n");
+
+    for (i = 0; i < sizeof(test_keys) / sizeof(test_keys[0]); i++) {
+        uint32_t subkeys[24][4][4];
+        
+        fprintf(fp, "# Key Schedule Test %zu\n", i + 1);
+        fprintf(fp, "COUNT = %zu\n", i);
+        print_hex_data(fp, "MASTER_KEY", test_keys[i], 32);
+        
+        Charybdis_KeySchedule(test_keys[i], subkeys);
+        
+        /* Print first few and last few subkeys */
+        print_subkey_matrix(fp, "K[0]", subkeys[0]);
+        print_subkey_matrix(fp, "K[1]", subkeys[1]);
+        print_subkey_matrix(fp, "K[2]", subkeys[2]);
+        print_subkey_matrix(fp, "K[21]", subkeys[21]);
+        print_subkey_matrix(fp, "K[22]", subkeys[22]);
+        print_subkey_matrix(fp, "K[23]", subkeys[23]);
+        
+        fprintf(fp, "\n");
+    }
+    
+    fclose(fp);
+    printf("Generated key schedule test vectors: %s\n", filename);
+}
+
+/* Generate variable key test vectors */
+static void generate_variable_key_test_vectors(const char* filename) {
+    /* Fixed plaintext (all zeros) */
+    uint8_t plaintext[64] = {0};
+    int i;
+    FILE* fp = fopen(filename, "wb");
+    if (!fp) {
+        printf("Error: Cannot create file %s\n", filename);
+        return;
+    }
+    
+    fprintf(fp, "# Charybdis Variable Key Test Vectors\n");
+    fprintf(fp, "# Block Cipher: Charybdis\n");
+    fprintf(fp, "# Test: Single bit set in key, zero plaintext\n");
+    fprintf(fp, "# Generated: %s\n", __DATE__);
+    fprintf(fp, "\n");
+    
+    /* Test each bit position in the key */
+    for (i = 0; i < 256; i++) {
+        uint8_t key[32] = {0};
+        uint32_t subkeys[24][4][4];
+        uint8_t ciphertext[64];
+        
+        /* Set single bit */
+        key[i / 8] = 1 << (i % 8);
+        
+        fprintf(fp, "# Variable Key Test - Bit %d\n", i);
+        fprintf(fp, "COUNT = %d\n", i);
+        print_hex_data(fp, "KEY", key, 32);
+        print_hex_data(fp, "PLAINTEXT", plaintext, 64);
+        
+        Charybdis_KeySchedule(key, subkeys);
+        Charybdis_EncryptBlock(plaintext, ciphertext, subkeys);
+        print_hex_data(fp, "CIPHERTEXT", ciphertext, 64);
+        
+        fprintf(fp, "\n");
+    }
+    
+    fclose(fp);
+    printf("Generated variable key test vectors: %s\n", filename);
+}
+
+/* Generate variable text test vectors */
+static void generate_variable_text_test_vectors(const char* filename) {
+    /* Fixed key (all zeros) */
+    uint8_t key[32] = {0};
+    uint32_t subkeys[24][4][4];
+    int i;
+    FILE* fp = fopen(filename, "wb");
+    if (!fp) {
+        printf("Error: Cannot create file %s\n", filename);
+        return;
+    }
+    
+    fprintf(fp, "# Charybdis Variable Text Test Vectors\n");
+    fprintf(fp, "# Block Cipher: Charybdis\n");
+    fprintf(fp, "# Test: Single bit set in plaintext, zero key\n");
+    fprintf(fp, "# Generated: %s\n", __DATE__);
+    fprintf(fp, "\n");
+    
+
+    Charybdis_KeySchedule(key, subkeys);
+    
+    /* Test each bit position in the plaintext */
+    for (i = 0; i < 512; i++) {
+        uint8_t plaintext[64] = {0};
+        uint8_t ciphertext[64];
+        
+        /* Set single bit */
+        plaintext[i / 8] = 1 << (i % 8);
+        
+        fprintf(fp, "# Variable Text Test - Bit %d\n", i);
+        fprintf(fp, "COUNT = %d\n", i);
+        print_hex_data(fp, "KEY", key, 32);
+        print_hex_data(fp, "PLAINTEXT", plaintext, 64);
+        
+        Charybdis_EncryptBlock(plaintext, ciphertext, subkeys);
+        print_hex_data(fp, "CIPHERTEXT", ciphertext, 64);
+        
+        fprintf(fp, "\n");
+    }
+    
+    fclose(fp);
+    printf("Generated variable text test vectors: %s\n", filename);
+}
+
+/* Generate Monte Carlo test vectors */
+static void generate_monte_carlo_test_vectors(const char* filename) {
+    /* Initial values */
+    uint8_t key[32] = {
+        0x01,0x23,0x45,0x67,0x89,0xAB,0xCD,0xEF,0xFE,0xDC,0xBA,0x98,0x76,0x54,0x32,0x10,
+        0x89,0xAB,0xCD,0xEF,0x01,0x23,0x45,0x67,0x76,0x54,0x32,0x10,0xFE,0xDC,0xBA,0x98
+    };
+    uint8_t plaintext[64] = {
+        0x01,0x23,0x45,0x67,0x89,0xAB,0xCD,0xEF,0xFE,0xDC,0xBA,0x98,0x76,0x54,0x32,0x10,
+        0x89,0xAB,0xCD,0xEF,0x01,0x23,0x45,0x67,0x76,0x54,0x32,0x10,0xFE,0xDC,0xBA,0x98,
+        0x01,0x23,0x45,0x67,0x89,0xAB,0xCD,0xEF,0xFE,0xDC,0xBA,0x98,0x76,0x54,0x32,0x10,
+        0x89,0xAB,0xCD,0xEF,0x01,0x23,0x45,0x67,0x76,0x54,0x32,0x10,0xFE,0xDC,0xBA,0x98
+    };
+    int i;
+    FILE* fp = fopen(filename, "wb");
+    if (!fp) {
+        printf("Error: Cannot create file %s\n", filename);
+        return;
+    }
+    
+    fprintf(fp, "# Charybdis Monte Carlo Test Vectors\n");
+    fprintf(fp, "# Block Cipher: Charybdis\n");
+    fprintf(fp, "# Test: Monte Carlo encryption test\n");
+    fprintf(fp, "# Generated: %s\n", __DATE__);
+    fprintf(fp, "\n");
+    
+    fprintf(fp, "# Initial Values\n");
+    print_hex_data(fp, "KEY", key, 32);
+    print_hex_data(fp, "PLAINTEXT", plaintext, 64);
+    fprintf(fp, "\n");
+    
+    /* Monte Carlo iterations */
+    for (i = 0; i < 100; i++) {
+        uint32_t subkeys[24][4][4];
+        uint8_t ciphertext[64];
+        int j;
+        
+        /* Generate subkeys and encrypt */
+        Charybdis_KeySchedule(key, subkeys);
+        Charybdis_EncryptBlock(plaintext, ciphertext, subkeys);
+        
+        if (i % 10 == 0) {  /* Print every 10th iteration */
+            fprintf(fp, "# Monte Carlo Iteration %d\n", i);
+            fprintf(fp, "COUNT = %d\n", i);
+            print_hex_data(fp, "KEY", key, 32);
+            print_hex_data(fp, "PLAINTEXT", plaintext, 64);
+            print_hex_data(fp, "CIPHERTEXT", ciphertext, 64);
+            fprintf(fp, "\n");
+        }
+        
+        /* Update key and plaintext for next iteration */
+        /* Key = Key XOR Ciphertext[0:31] */
+        for (j = 0; j < 32; j++) {
+            key[j] ^= ciphertext[j];
+        }
+        
+        /* Plaintext = Ciphertext */
+        memcpy(plaintext, ciphertext, 64);
+    }
+    
+    fclose(fp);
+    printf("Generated Monte Carlo test vectors: %s\n", filename);
+}
+
+/* Generate random test vectors */
+static void generate_random_test_vectors(const char* filename, int count) {
+    chaskey_prng_t prng;
+    int i;
+    FILE* fp = fopen(filename, "wb");
+    if (!fp) {
+        printf("Error: Cannot create file %s\n", filename);
+        return;
+    }
+    
+    fprintf(fp, "# Charybdis Random Test Vectors\n");
+    fprintf(fp, "# Block Cipher: Charybdis\n");
+    fprintf(fp, "# Test: Random key and plaintext pairs\n");
+    fprintf(fp, "# Count: %d\n", count);
+    fprintf(fp, "# Generated: %s\n", __DATE__);
+    fprintf(fp, "\n");
+    
+    /* Initialize our high-quality, reproducible PRNG */
+    chaskey_prng_init(&prng);
+    
+    for (i = 0; i < count; i++) {
+        uint8_t key[32], plaintext[64], ciphertext[64];
+        uint32_t subkeys[24][4][4];
+        
+        /* Generate random key and plaintext  using Chaskey-CTR */
+        chaskey_prng_generate(&prng, key, 32);
+        chaskey_prng_generate(&prng, plaintext, 64);
+        
+        fprintf(fp, "# Random Test Vector %d\n", i + 1);
+        fprintf(fp, "COUNT = %d\n", i);
+        print_hex_data(fp, "KEY", key, 32);
+        print_hex_data(fp, "PLAINTEXT", plaintext, 64);
+        
+        Charybdis_KeySchedule(key, subkeys);
+        Charybdis_EncryptBlock(plaintext, ciphertext, subkeys);
+        print_hex_data(fp, "CIPHERTEXT", ciphertext, 64);
+        
+        fprintf(fp, "\n");
+    }
+    
+    fclose(fp);
+    printf("Generated %d random test vectors: %s\n", count, filename);
+}
+
+/* Generate intermediate round state test vectors (encryption) */
+static void generate_encryption_round_state_test_vectors(const char* filename) {
+    /* Test case */
+    const uint8_t key[32] = {
+        0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0A,0x0B,0x0C,0x0D,0x0E,0x0F,
+        0x10,0x11,0x12,0x13,0x14,0x15,0x16,0x17,0x18,0x19,0x1A,0x1B,0x1C,0x1D,0x1E,0x1F
+    };
+    const uint8_t plaintext[64] = {
+        0x00,0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88,0x99,0xAA,0xBB,0xCC,0xDD,0xEE,0xFF,
+        0x00,0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88,0x99,0xAA,0xBB,0xCC,0xDD,0xEE,0xFF,
+        0x00,0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88,0x99,0xAA,0xBB,0xCC,0xDD,0xEE,0xFF,
+        0x00,0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88,0x99,0xAA,0xBB,0xCC,0xDD,0xEE,0xFF
+    };
+    uint32_t subkeys[24][4][4];
+    uint32_t S[4][4];
+    int i, j;
+    size_t idx;
+    const int rounds_to_show[] = {1, 2, 5, 10, 15, 20, 22};
+    size_t num_rounds_to_show = sizeof(rounds_to_show) / sizeof(rounds_to_show[0]);
+    int last_round;
+    FILE* fp = fopen(filename, "wb");
+    if (!fp) {
+        printf("Error: Cannot create file %s\n", filename);
+        return;
+    }
+    
+    fprintf(fp, "# Charybdis Encryption Round State Test Vectors\n");
+    fprintf(fp, "# Block Cipher: Charybdis\n");
+    fprintf(fp, "# Test: Intermediate round states during encryption\n");
+    fprintf(fp, "# Generated: %s\n", __DATE__);
+    fprintf(fp, "\n");
+    
+    fprintf(fp, "# Test Input\n");
+    print_hex_data(fp, "KEY", key, 32);
+    print_hex_data(fp, "PLAINTEXT", plaintext, 64);
+    fprintf(fp, "\n");
+    
+    /* Generate subkeys */
+    Charybdis_KeySchedule(key, subkeys);
+    
+    /* Initial whitening */
+    for (i = 0; i < 4; i++) {
+        for (j = 0; j < 4; j++) {
+            S[i][j] = load_le32(plaintext + 4 * (4 * i + j)) ^ subkeys[0][i][j];
+        }
+    }
+    
+    fprintf(fp, "# State after initial whitening (K[0])\n");
+    print_subkey_matrix(fp, "STATE", S);
+    fprintf(fp, "\n");
+    
+    /* Show states after selected rounds */
+    last_round = 0; // State is currently pre-Round-1
+    
+    for (idx = 0; idx < num_rounds_to_show; idx++) {
+        int target_round = rounds_to_show[idx];
+        int r;
+        /* Apply rounds from (last_round + 1) up to the target */
+        for (r = last_round + 1; r <= target_round; r++) {
+            Round(S, subkeys[r], r);
+        }
+        
+        fprintf(fp, "# State after Round %d\n", target_round);
+        print_subkey_matrix(fp, "STATE", S);
+        fprintf(fp, "\n");
+        
+        last_round = target_round; // Update our position for the next iteration
+    }
+    
+    /* Final whitening */
+    for (i = 0; i < 4; i++) {
+        for (j = 0; j < 4; j++) {
+            S[i][j] ^= subkeys[23][i][j];
+        }
+    }
+    
+    fprintf(fp, "# Final ciphertext after whitening (K[23])\n");
+    uint8_t final_ciphertext[64];
+    for (i = 0; i < 4; i++) {
+        for (j = 0; j < 4; j++) {
+            store_le32(final_ciphertext + 4 * (4 * i + j), S[i][j]);
+        }
+    }
+    print_hex_data(fp, "CIPHERTEXT", final_ciphertext, 64);
+    
+    fclose(fp);
+    printf("Generated round state test vectors: %s\n", filename);
+}
+
+/* Generate intermediate round state test vectors (decryption) */
+static void generate_decryption_round_state_test_vectors(const char* filename) {
+    /* Test case - same as encryption states */
+    const uint8_t key[32] = {
+        0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0A,0x0B,0x0C,0x0D,0x0E,0x0F,
+        0x10,0x11,0x12,0x13,0x14,0x15,0x16,0x17,0x18,0x19,0x1A,0x1B,0x1C,0x1D,0x1E,0x1F
+    };
+    const uint8_t plaintext[64] = {
+        0x00,0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88,0x99,0xAA,0xBB,0xCC,0xDD,0xEE,0xFF,
+        0x00,0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88,0x99,0xAA,0xBB,0xCC,0xDD,0xEE,0xFF,
+        0x00,0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88,0x99,0xAA,0xBB,0xCC,0xDD,0xEE,0xFF,
+        0x00,0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88,0x99,0xAA,0xBB,0xCC,0xDD,0xEE,0xFF
+    };
+    
+    uint32_t subkeys[24][4][4];
+    uint32_t S[4][4];
+    uint8_t ciphertext[64];
+    uint8_t final_plaintext[64];
+    int i, j;
+    const int rounds_to_show[] = {22, 20, 15, 10, 5, 2, 1};
+    size_t num_rounds_to_show = sizeof(rounds_to_show) / sizeof(rounds_to_show[0]);
+    int last_round;
+    size_t idx;
+
+    FILE* fp = fopen(filename, "wb");
+    if (!fp) {
+        printf("Error: Cannot create file %s\n", filename);
+        return;
+    }
+    
+    fprintf(fp, "# Charybdis Decryption Round State Test Vectors\n");
+    fprintf(fp, "# Block Cipher: Charybdis\n");
+    fprintf(fp, "# Test: Intermediate round states during decryption\n");
+    fprintf(fp, "# Generated: %s\n", __DATE__);
+    fprintf(fp, "\n");
+    
+
+    
+    fprintf(fp, "# Test Input\n");
+    print_hex_data(fp, "KEY", key, 32);
+    print_hex_data(fp, "PLAINTEXT", plaintext, 64);
+    
+    /* Generate subkeys and ciphertext */
+    Charybdis_KeySchedule(key, subkeys);
+    Charybdis_EncryptBlock(plaintext, ciphertext, subkeys);
+    print_hex_data(fp, "CIPHERTEXT", ciphertext, 64);
+    fprintf(fp, "\n");
+    
+    /* Initial setup for decryption */
+    for (i = 0; i < 4; i++) {
+        for (j = 0; j < 4; j++) {
+            S[i][j] = load_le32(ciphertext + 4 * (4 * i + j)) ^ subkeys[23][i][j];
+        }
+    }
+    
+    fprintf(fp, "# State after initial whitening (K[23])\n");
+    print_subkey_matrix(fp, "STATE", S);
+    fprintf(fp, "\n");
+    
+    /* Show states after selected inverse rounds */
+
+
+    last_round = 23; // Start from round 23 (i.e., before round 22)
+
+    for (idx = 0; idx < num_rounds_to_show; idx++) {
+        int target_round = rounds_to_show[idx];
+        int r;
+        
+        /* Apply inverse rounds from last_round down to target_round */
+        for (r = last_round - 1; r >= target_round; r--) {
+            InverseRound(S, subkeys[r], r);
+        }
+        
+        fprintf(fp, "# State after Inverse Round %d\n", target_round);
+        print_subkey_matrix(fp, "STATE", S);
+        fprintf(fp, "\n");
+        
+        last_round = target_round; // Update our position for the next iteration
+    }
+    
+    /* Final whitening */
+    for (i = 0; i < 4; i++) {
+        for (j = 0; j < 4; j++) {
+            S[i][j] ^= subkeys[0][i][j];
+        }
+    }
+    
+    fprintf(fp, "# Final plaintext after whitening (K[0])\n");
+    for (i = 0; i < 4; i++) {
+        for (j = 0; j < 4; j++) {
+            store_le32(final_plaintext + 4 * (4 * i + j), S[i][j]);
+        }
+    }
+    print_hex_data(fp, "PLAINTEXT", final_plaintext, 64);
+    
+    fclose(fp);
+    printf("Generated decryption round state test vectors: %s\n", filename);
+}
+
+/* Main test vector generation function */
+static void generate_all_test_vectors(void) {
+    /* Test vector configurations */
+    const test_vector_config_t configs[] = {
+        {TV_BASIC, 0, "test_vectors/charybdis_basic.txt", "Basic encryption/decryption test vectors"},
+        {TV_KEY_SCHEDULE, 0, "test_vectors/charybdis_key_schedule.txt", "Key schedule test vectors"},
+        {TV_VARIABLE_KEY, 0, "test_vectors/charybdis_variable_key.txt", "Variable key test vectors"},
+        {TV_VARIABLE_TEXT, 0, "test_vectors/charybdis_variable_text.txt", "Variable text test vectors"},
+        {TV_MONTE_CARLO, 0, "test_vectors/charybdis_monte_carlo.txt", "Monte Carlo test vectors"},
+        {TV_RANDOM, 100, "test_vectors/charybdis_random.txt", "Random test vectors"}
+    };
+    size_t i;
+
+    printf("=== Charybdis Test Vector Generation ===\n\n");
+    
+    /* Create test vectors directory if it doesn't exist */
+#ifdef _WIN32
+    system("mkdir test_vectors 2>nul");
+#else
+    system("mkdir -p test_vectors");
+#endif
+
+    for (i = 0; i < sizeof(configs) / sizeof(configs[0]); i++) {
+        printf("Generating %s...\n", configs[i].description);
+        
+        switch (configs[i].type) {
+            case TV_BASIC:
+                generate_basic_test_vectors(configs[i].filename);
+                break;
+            case TV_KEY_SCHEDULE:
+                generate_key_schedule_test_vectors(configs[i].filename);
+                break;
+            case TV_VARIABLE_KEY:
+                generate_variable_key_test_vectors(configs[i].filename);
+                break;
+            case TV_VARIABLE_TEXT:
+                generate_variable_text_test_vectors(configs[i].filename);
+                break;
+            case TV_MONTE_CARLO:
+                generate_monte_carlo_test_vectors(configs[i].filename);
+                break;
+            case TV_RANDOM:
+                generate_random_test_vectors(configs[i].filename, configs[i].count);
+                break;
+        }
+    }
+    
+    /* Generate additional specialized test vectors */
+    printf("Generating round state test vectors...\n");
+    generate_encryption_round_state_test_vectors("test_vectors/charybdis_encryption_round_states.txt");
+    generate_decryption_round_state_test_vectors("test_vectors/charybdis_decryption_round_states.txt");
+
+    printf("\nTest vector generation completed successfully!\n");
+    printf("Generated files in test_vectors/ directory:\n");
+    printf("- charybdis_basic.txt (Basic test vectors)\n");
+    printf("- charybdis_key_schedule.txt (Key schedule vectors)\n");
+    printf("- charybdis_variable_key.txt (Variable key vectors)\n");
+    printf("- charybdis_variable_text.txt (Variable text vectors)\n");
+    printf("- charybdis_monte_carlo.txt (Monte Carlo vectors)\n");
+    printf("- charybdis_random.txt (Random vectors)\n");
+    printf("- charybdis_encryption_round_states.txt (Encryption round state vectors)\n");
+    printf("- charybdis_decryption_round_states.txt (Decryption round state vectors)\n");
+}
+
+int main(void) {
+    /* Run self-tests first */
+    const uint8_t key[32] = {
+        0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,
+        0x08,0x09,0x0A,0x0B,0x0C,0x0D,0x0E,0x0F,
+        0x10,0x11,0x12,0x13,0x14,0x15,0x16,0x17,
+        0x18,0x19,0x1A,0x1B,0x1C,0x1D,0x1E,0x1F
+    };
+    const uint8_t pt[64] = {
+        0x00,0x11,0x22,0x33,0x44,0x55,0x66,0x77,
+        0x88,0x99,0xAA,0xBB,0xCC,0xDD,0xEE,0xFF,
+        0x00,0x11,0x22,0x33,0x44,0x55,0x66,0x77,
+        0x88,0x99,0xAA,0xBB,0xCC,0xDD,0xEE,0xFF,
+        0x00,0x11,0x22,0x33,0x44,0x55,0x66,0x77,
+        0x88,0x99,0xAA,0xBB,0xCC,0xDD,0xEE,0xFF,
+        0x00,0x11,0x22,0x33,0x44,0x55,0x66,0x77,
+        0x88,0x99,0xAA,0xBB,0xCC,0xDD,0xEE,0xFF
+    };
+    static const uint8_t expected_ct[64] = {
+        0x4F,0x27,0xB8,0xBF,0xB0,0x50,0x0F,0xA6,
+        0x7A,0xCC,0xCD,0x94,0x64,0x36,0xDE,0x03,
+        0xBE,0x94,0xC7,0xBE,0x56,0xE0,0xDD,0x67,
+        0xB0,0xEB,0x66,0x60,0x5F,0xDD,0x46,0xED,
+        0x81,0x21,0xF8,0x95,0xA0,0xAF,0x58,0x2E,
+        0x18,0x5B,0x45,0xB9,0x30,0xC3,0x78,0x19,
+        0xAF,0x48,0x3D,0xB2,0xB2,0xA2,0x40,0x6D,
+        0xCB,0xC2,0x7D,0xA5,0xCB,0xBA,0xBB,0xF2
+    };
+
+    uint32_t subkeys[24][4][4];
+    uint8_t ct[64], pt_out[64];
+    
+    printf("=== Charybdis Self-Test ===\n");
+    
+    /* Generate subkeys and encrypt */
+    Charybdis_KeySchedule(key, subkeys);
+    Charybdis_EncryptBlock(pt, ct, subkeys);
+    
+    /* Verify encryption */
+    if (memcmp(ct, expected_ct, 64) != 0) {
+        printf("Encryption test failed\n");
+        return 1;
+    }
+    
+    /* Verify decryption */
+    Charybdis_DecryptBlock(ct, pt_out, subkeys);
+    if (memcmp(pt_out, pt, 64) != 0) {
+        printf("Decryption test failed\n");
+        return 2;
+    }
+    
+    printf("Charybdis self-test passed\n\n");
+    
+    /* Generate test vectors */
+    generate_all_test_vectors();
+    
+    return 0;
+}
+#endif /* GENERATE_TEST_VECTORS */

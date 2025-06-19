@@ -93,6 +93,22 @@ static int check_windows_xsave_support(void) {
     return (xcr0 & 0x6) == 0x6;
 }
 #else
+static inline void cpuid_count(unsigned int op, unsigned int sub_op,
+                               unsigned int* a, unsigned int* b,
+                               unsigned int* c, unsigned int* d) {
+    __asm__ __volatile__(
+        "cpuid"
+        : "=a" (*a), "=b" (*b), "=c" (*c), "=d" (*d)
+        : "a" (op), "c" (sub_op)
+    );
+}
+
+static unsigned long long xgetbv()
+{
+    uint32_t eax, edx;
+    __asm__ __volatile__(".byte 0x0F, 0x01, 0xd0" : "=a"(eax), "=d"(edx) : "c"(0));
+    return ((uint64_t)edx << 32) | eax;
+}
 static int check_os_avx_support(void) {
     unsigned int eax, ebx, ecx, edx;
 
@@ -101,7 +117,7 @@ static int check_os_avx_support(void) {
     if (!(ecx & (1U << 27))) return 0; /* OSXSAVE bit */
 
     /* Verify YMM state is saved/restored by OS */
-    unsigned long long xcr0 = _xgetbv(0);
+    unsigned long long xcr0 = xgetbv();
     return (xcr0 & 0x6) == 0x6; /* XMM and YMM state */
 }
 #endif
@@ -111,10 +127,14 @@ static void clear_ymm_registers(void) {
 #ifdef _MSC_VER
     _mm256_zeroupper();  /* MSVC doesn't have zeroall */
 #else
-    #if __has_builtin(_mm256_zeroall)
-        _mm256_zeroall();
+    #if (defined(__GNUC__) && !defined(__clang__) && __GNUC__ >= 10) || defined(__clang__)
+        #if __has_builtin(_mm256_zeroall)
+            _mm256_zeroall();
+        #else
+            _mm256_zeroupper();
+        #endif
     #else
-        _mm256_zeroupper();
+        _mm256_zeroupper();  /* Old GCC fallback */
     #endif
 #endif
 }
@@ -151,9 +171,7 @@ int charybdis_avx2_available(void) {
     }
 
     /* Check for AVX2 (CPUID.EAX=7,ECX=0:EBX.AVX2[bit 5]) */
-    if (!__get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx)) {
-        return 0; 
-    }
+    cpuid_count(7, 0, &eax, &ebx, &ecx, &edx);
     if (!(ebx & (1U << 5))) {
         return 0; 
     }
