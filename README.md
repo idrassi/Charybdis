@@ -48,6 +48,7 @@ For the complete algorithm details, see the [Charybdis Specification](./doc/Char
 │   ├── charybdis.h               # Header for reference implementation
 │   ├── charybdis_avx2.c          # AVX2 optimized C implementation
 │   └── charybdis_avx2.h          # Header for AVX2 implementation
+├── test_vectors/                 # Test vectors for Charybdis
 └── tool/
     └── charybdis_constants.c     # Constants generation program for Charybdis specification
 ```
@@ -55,23 +56,19 @@ For the complete algorithm details, see the [Charybdis Specification](./doc/Char
 ## Building
 
 You can compile the reference implementation using a standard C compiler (e.g., GCC, Clang).
+On Windows, you can use Visual Studio solution file `msvc/charybdis_bench.sln` to build the implementation and its benchmarks.
 
-### Compiling with Tests
+### Compiling with Tests and Benchmarks
 
-To compile the reference implementation with self-tests enabled:
-
-```bash
-gcc -o charybdis_test -DSELF_TEST src/charybdis.c src/charybdis_avx2.c -mavx2
-```
-
-### Compiling with Benchmarks
-
-To compile the reference implementation with benchmarks enabled:
+To compile the reference implementation with self-tests and benchmarks enabled:
 
 ```bash
-gcc -o charybdis_benchmark -DBENCHMARK src/charybdis.c src/charybdis_avx2.c -mavx2 -O2
+gcc -c -DBENCHMARK src/charybdis.c -O2
+gcc -c -DBENCHMARK src/charybdis_avx2.c -mavx2 -O2
+gcc -o charybdis_test charybdis.o charybdis_avx2.o
 ```
-*(Optimization (`-O2` or `-O3`) is recommended for benchmarks. `-mavx2` is needed for the AVX2 part of the benchmark.)*
+
+*(Optimization (`-O2` or `-O3`) is recommended for benchmarks. `-mavx2` is needed for the AVX2 optimized implementation.)*
 
 ### Compiling Constants Generator
 
@@ -85,21 +82,13 @@ gcc -o charybdis_constants tool/charybdis_constants.c -lssl -lcrypto
 
 ### Tests
 
-After compiling with `SELF_TEST` defined, run the executable:
+After compiling, run the executable:
 
 ```bash
 ./charybdis_test
 ```
 It will perform self-tests for both the reference and AVX2 (if available) implementations and print the results.
-
-### Benchmarks
-
-After compiling with `BENCHMARK` defined, run the executable:
-
-```bash
-./charybdis_benchmark
-```
-It will run performance benchmarks for both implementations across various data sizes.
+It will also run performance benchmarks for both implementations across various data sizes.
 
 ### Constants Generation
 
@@ -150,11 +139,30 @@ int main() {
 ### AVX2 Optimized Implementation
 
 ```c
+#define _XOPEN_SOURCE  500 // for posix_memalign
 #include "src/charybdis.h"       // For Charybdis_KeySchedule and constants
 #include "src/charybdis_avx2.h" // For AVX2 functions
 #include <stdio.h>
 #include <string.h>
-#include <stdlib.h> // For _aligned_malloc/_aligned_free or aligned_alloc
+#include <stdlib.h>
+
+static inline void* malloc_aligned(size_t size, size_t alignment) {
+#ifdef _WIN32
+    return _aligned_malloc(size, alignment);
+#else
+    void* ptr = NULL;
+    if (posix_memalign(&ptr, alignment, size) != 0) {
+        return NULL;
+    }
+    return ptr;
+#endif
+}
+
+#ifdef _WIN32
+    #define free_aligned(x) _aligned_free(x)
+#else
+    #define free_aligned(x) free(x)
+#endif
 
 int main() {
     if (!charybdis_avx2_available()) {
@@ -167,15 +175,9 @@ int main() {
     size_t data_size = num_blocks * CHARYBDIS_BLOCK_SIZE;
 
     // Allocate aligned memory for AVX2 operations
-#ifdef _WIN32
-    uint8_t* plaintext = (uint8_t*)_aligned_malloc(data_size, 32);
-    uint8_t* ciphertext = (uint8_t*)_aligned_malloc(data_size, 32);
-    uint8_t* decrypted_text = (uint8_t*)_aligned_malloc(data_size, 32);
-#else
-    uint8_t* plaintext = (uint8_t*)aligned_alloc(32, data_size);
-    uint8_t* ciphertext = (uint8_t*)aligned_alloc(32, data_size);
-    uint8_t* decrypted_text = (uint8_t*)aligned_alloc(32, data_size);
-#endif
+    uint8_t* plaintext = (uint8_t*)malloc_aligned(data_size, 32);
+    uint8_t* ciphertext = (uint8_t*)malloc_aligned(data_size, 32);
+    uint8_t* decrypted_text = (uint8_t*)malloc_aligned(data_size, 32);
 
     if (!plaintext || !ciphertext || !decrypted_text) {
         printf("Memory allocation failed.\n");
@@ -216,15 +218,9 @@ int main() {
     charybdis_avx2_clear_context(&avx2_ctx);
 
     // Free aligned memory
-#ifdef _WIN32
-    _aligned_free(plaintext);
-    _aligned_free(ciphertext);
-    _aligned_free(decrypted_text);
-#else
-    free(plaintext);
-    free(ciphertext);
-    free(decrypted_text);
-#endif
+    free_aligned(plaintext);
+    free_aligned(ciphertext);
+    free_aligned(decrypted_text);
 
     return 0;
 }
