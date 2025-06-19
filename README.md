@@ -63,8 +63,8 @@ On Windows, you can use Visual Studio solution file `msvc/charybdis_bench.sln` t
 To compile the reference implementation with self-tests and benchmarks enabled:
 
 ```bash
-gcc -c -DBENCHMARK src/charybdis.c -O2
-gcc -c -DBENCHMARK src/charybdis_avx2.c -mavx2 -O2
+gcc -c -std=c99 -DBENCHMARK src/charybdis.c -O2
+gcc -c -std=c99 -DBENCHMARK src/charybdis_avx2.c -mavx2 -O2
 gcc -o charybdis_test charybdis.o charybdis_avx2.o
 ```
 
