@@ -82,10 +82,9 @@ int generate_shake256(const char* seed, uint8_t* out_buffer, size_t out_len) {
     const EVP_MD* shake256 = NULL;
     int success = 0;
 
-    // Use the modern fetchable API for providers
-    shake256 = EVP_MD_fetch(NULL, "SHAKE256", NULL);
+    shake256 = EVP_shake256();
     if (shake256 == NULL) {
-        fprintf(stderr, "Error: SHAKE256 not found.\n");
+        fprintf(stderr, "Error: SHAKE256 not available.\n");
         goto err;
     }
 
@@ -115,7 +114,6 @@ int generate_shake256(const char* seed, uint8_t* out_buffer, size_t out_len) {
 
 err:
     EVP_MD_CTX_free(mdctx);
-    EVP_MD_free((EVP_MD*)shake256); // Cast is needed for older OpenSSL versions
     return success;
 }
 
