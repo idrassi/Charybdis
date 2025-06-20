@@ -36,13 +36,11 @@ For the complete algorithm details, see the [Charybdis Specification](./doc/Char
 ```
 .
 ├── .gitignore                    # Git ignore file
+├── CMakeLists.txt                # CMake build configuration file
 ├── LICENSE                       # CC0 1.0 Universal License file
 ├── README.md                     # This README file
 ├── doc/
 │   └── Charybdis-v1-spec.md      # Official Charybdis specification
-├── msvc/
-│   ├── charybdis_bench.sln       # Visual Studio solution for Charybdis benchmarks
-│   └── charybdis_bench.vcxproj   # Visual Studio project file for Charybdis benchmarks
 ├── src/
 │   ├── charybdis.c               # Reference C implementation, tests, and benchmarks
 │   ├── charybdis.h               # Header for reference implementation
@@ -55,34 +53,52 @@ For the complete algorithm details, see the [Charybdis Specification](./doc/Char
 
 ## Building
 
-You can compile the reference implementation using a standard C compiler (e.g., GCC, Clang).
-On Windows, you can use Visual Studio solution file `msvc/charybdis_bench.sln` to build the implementation and its benchmarks.
+Charybdis uses CMake for cross-platform builds. The CMake build will generate three binaries by default:
 
-### Compiling with Tests and Benchmarks
+- **charybdis_test**: Self-tests and benchmarks of the reference and AVX2 implementations.
+- **charybdis_constants**: Utility to generate and display all cipher constants.
+- **charybdis_test_vector_gen**: Utility to generate test vectors.
 
-To compile the reference implementation with self-tests and benchmarks enabled:
+### Building with CMake
+
+1. Create a build directory and run CMake:
+
+   ```bash
+   mkdir build
+   cd build
+   cmake ..
+   cmake --build . --config Release
+   ```
+
+2. The resulting binaries will be located in the `build` directory.
+
+#### Specifying OpenSSL Location (Windows)
+
+If you are building on Windows and OpenSSL is not installed in a standard location, you can specify the root directory of your OpenSSL installation using the `OPENSSL_ROOT_DIR` variable. This is especially useful if your OpenSSL headers and libraries are under a custom path (e.g., `C:/dev/libraries/openssl`):
 
 ```bash
-gcc -c -std=c99 -DBENCHMARK src/charybdis.c -O2
-gcc -c -std=c99 -DBENCHMARK src/charybdis_avx2.c -mavx2 -O2
-gcc -o charybdis_test charybdis.o charybdis_avx2.o
+cmake .. -DOPENSSL_ROOT_DIR=C:/dev/libraries/openssl
 ```
 
-*(Optimization (`-O2` or `-O3`) is recommended for benchmarks. `-mavx2` is needed for the AVX2 optimized implementation.)*
-
-### Compiling Constants Generator
-
-To compile the constants generation utility:
+If you are using **MSYS2 with MinGW64**, you can specify the OpenSSL root as follows:
 
 ```bash
-gcc -o charybdis_constants tool/charybdis_constants.c -lssl -lcrypto
+cmake .. -DOPENSSL_ROOT_DIR=/mingw64
 ```
+
+On MSYS2, install the OpenSSL headers and libraries with:
+
+```bash
+pacman -S mingw-w64-x86_64-openssl
+```
+
+Make sure that the `include` and `lib` folders are present under the specified OpenSSL root directory.
 
 ## Running
 
 ### Tests
 
-After compiling, run the executable:
+After building, run the test executable:
 
 ```bash
 ./charybdis_test
@@ -92,12 +108,21 @@ It will also run performance benchmarks for both implementations across various 
 
 ### Constants Generation
 
-After compiling the constants generator, run:
+After building, run the constants generator:
 
 ```bash
 ./charybdis_constants
 ```
 It will generate and display all cipher constants for verification.
+
+### Test Vector Generation
+
+To generate test vectors, run:
+
+```bash
+./charybdis_test_vector_gen
+```
+This will create test vectors in the `test_vectors/` directory.
 
 ## Usage
 
